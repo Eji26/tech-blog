@@ -4,6 +4,11 @@ import {
     Trash2, Edit, Plus, X, Loader2, CheckCircle, AlertCircle, Youtube, ListVideo,
     Github, FileText, Globe, Box, Filter, Download, Upload, Clock
 } from 'lucide-react';
+import { db } from './firebase';
+import {
+    collection, addDoc, onSnapshot, query, orderBy,
+    deleteDoc, doc, updateDoc, getDocs, writeBatch
+} from 'firebase/firestore';
 
 // --- INITIAL DATA & CONSTANTS ---
 const CATEGORIES = [
@@ -71,7 +76,7 @@ export default function App() {
     // Global State
     const [route, setRoute] = useState('home'); // 'home', 'admin-login', 'admin-dashboard'
     const [darkMode, setDarkMode] = useState(() => lsGet('techblog_darkmode', false));
-    const [resources, setResources] = useState(() => lsGet('techblog_resources', []));
+    const [resources, setResources] = useState([]);
     const [bookmarks, setBookmarks] = useState(() => lsGet('techblog_bookmarks', []));
     const [auth, setAuth] = useState(() => lsGet('techblog_auth', null));
 
@@ -85,10 +90,65 @@ export default function App() {
         }
     }, [darkMode]);
 
-    // Sync data to localStorage
+    // Real-time sync from Firestore
     useEffect(() => {
-        lsSet('techblog_resources', resources);
-    }, [resources]);
+        console.log("Setting up resilient Firestore sync...");
+        const q = collection(db, "resources");
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            console.log(`Firestore snapshot received at ${new Date().toLocaleTimeString()}: ${snapshot.size} docs`);
+            const data = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+
+            setResources(prev => {
+                const sortedData = data.sort((a, b) => {
+                    const dateA = a.addedAt ? new Date(a.addedAt) : new Date(0);
+                    const dateB = b.addedAt ? new Date(b.addedAt) : new Date(0);
+                    return dateB - dateA;
+                });
+                console.log("State updated with sorted data:", sortedData.length, "items");
+                return [...sortedData]; // Ensure new array reference
+            });
+        }, (error) => {
+            console.error("Firestore sync error:", error);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // One-time migration from LocalStorage to Firestore
+    useEffect(() => {
+        const migrate = async () => {
+            const localData = lsGet('techblog_resources', []);
+            console.log(`Checking migration. Local items: ${localData.length}`);
+            if (localData.length > 0) {
+                const snapshot = await getDocs(collection(db, "resources"));
+                console.log(`Firestore is empty? ${snapshot.empty}`);
+                if (snapshot.empty) {
+                    console.log("Migrating local resources to Firestore...");
+                    const batch = writeBatch(db);
+                    localData.forEach(res => {
+                        const newDocRef = doc(collection(db, "resources"));
+                        const { id, ...data } = res;
+                        // Ensure required fields for persistence/sorting exist
+                        const enrichedData = {
+                            ...data,
+                            addedAt: data.addedAt || new Date().toISOString(),
+                            addedBy: data.addedBy || 'admin'
+                        };
+                        batch.set(newDocRef, enrichedData);
+                    });
+                    await batch.commit();
+                    localStorage.removeItem('techblog_resources');
+                    console.log("Migration complete. Local storage cleared.");
+                } else {
+                    console.log("Firestore not empty, skipping migration and clearing local storage.");
+                    localStorage.removeItem('techblog_resources');
+                }
+            }
+        };
+        migrate();
+    }, []);
 
     useEffect(() => {
         lsSet('techblog_bookmarks', bookmarks);
@@ -147,6 +207,7 @@ export default function App() {
                 setAuth={setAuth}
                 navigate={navigate}
                 darkMode={darkMode}
+                toggleDarkMode={() => setDarkMode(!darkMode)}
             />
         );
     }
@@ -628,22 +689,47 @@ function AdminDashboard({ resources, setResources, setAuth, navigate, darkMode, 
     const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
 
     const showToast = (message, type = 'success') => {
+        console.log(`Toast: [${type}] ${message}`);
         setToast({ message, type });
         setTimeout(() => setToast(null), 3000);
     };
 
-    const handleDelete = (id) => {
-        if (window.confirm("Are you sure you want to delete this resource? This will also remove it from user bookmarks.")) {
-            setResources(prev => prev.filter(r => r.id !== id));
+    const handleRefresh = async () => {
+        showToast("Synchronizing with cloud...");
+        try {
+            const snapshot = await getDocs(collection(db, "resources"));
+            const data = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            const sortedData = data.sort((a, b) => {
+                const dateA = a.addedAt ? new Date(a.addedAt) : new Date(0);
+                const dateB = b.addedAt ? new Date(b.addedAt) : new Date(0);
+                return dateB - dateA;
+            });
+            setResources([...sortedData]);
+            showToast(`Sync complete: ${data.length} items found`);
+        } catch (err) {
+            console.error("Manual sync error:", err);
+            showToast("Sync failed", "error");
+        }
+    };
 
-            // Also cleanup bookmarks from localStorage directly since we don't have it in state here
+    const handleDelete = async (id) => {
+        if (window.confirm("Are you sure you want to delete this resource? This will also remove it from user bookmarks.")) {
             try {
+                await deleteDoc(doc(db, "resources", id));
+
+                // Cleanup bookmarks from localStorage
                 const bookmarks = lsGet('techblog_bookmarks', []);
                 const newBookmarks = bookmarks.filter(bId => bId !== id);
                 lsSet('techblog_bookmarks', newBookmarks);
-            } catch (e) { }
 
-            showToast("Resource deleted");
+                showToast("Resource deleted");
+            } catch (err) {
+                console.error("Delete error", err);
+                showToast("Failed to delete", "error");
+            }
         }
     };
 
@@ -657,21 +743,29 @@ function AdminDashboard({ resources, setResources, setAuth, navigate, darkMode, 
         setIsModalOpen(true);
     };
 
-    const saveResource = (resourceData) => {
-        if (editingResource) {
-            setResources(prev => prev.map(r => r.id === editingResource.id ? { ...r, ...resourceData } : r));
-            showToast("Resource updated successfully");
-        } else {
-            const newResource = {
-                ...resourceData,
-                id: generateId(),
-                addedAt: new Date().toISOString(),
-                addedBy: 'admin'
-            };
-            setResources(prev => [newResource, ...prev]);
-            showToast("Resource added successfully");
+    const saveResource = async (resourceData) => {
+        console.log("Saving resource to Firestore:", resourceData);
+        try {
+            if (editingResource) {
+                const docRef = doc(db, "resources", editingResource.id);
+                await updateDoc(docRef, resourceData);
+                console.log("Resource updated successfully");
+                showToast("Resource updated successfully");
+            } else {
+                const newResource = {
+                    ...resourceData,
+                    addedAt: new Date().toISOString(),
+                    addedBy: 'admin'
+                };
+                const docRef = await addDoc(collection(db, "resources"), newResource);
+                console.log("Resource added successfully with ID:", docRef.id);
+                showToast("Resource added successfully");
+            }
+            setIsModalOpen(false);
+        } catch (err) {
+            console.error("Save error:", err);
+            showToast("Failed to save resource", "error");
         }
-        setIsModalOpen(false);
     };
 
     const runBulkAIRecategorize = async () => {
@@ -888,19 +982,39 @@ function AdminDashboard({ resources, setResources, setAuth, navigate, darkMode, 
                                     if (!file) return;
 
                                     const reader = new FileReader();
-                                    reader.onload = (event) => {
+                                    reader.onload = async (event) => {
                                         try {
                                             const importedData = JSON.parse(event.target.result);
                                             if (!Array.isArray(importedData)) throw new Error("Expected an array of resources");
 
-                                            setResources(prev => {
-                                                const existingIds = new Set(prev.map(r => r.id));
-                                                const newResources = importedData.filter(r => !existingIds.has(r.id));
-                                                return [...newResources, ...prev];
+                                            showToast(`Uploading ${importedData.length} resources...`);
+                                            const batch = writeBatch(db);
+                                            const localIds = new Set(resources.map(r => r.id));
+                                            let addedCount = 0;
+
+                                            importedData.forEach(item => {
+                                                // Prevent duplicates by checking local state IDs
+                                                if (!item.id || !localIds.has(item.id)) {
+                                                    const newDocRef = doc(collection(db, "resources"));
+                                                    const { id, ...data } = item;
+                                                    batch.set(newDocRef, {
+                                                        ...data,
+                                                        addedAt: data.addedAt || new Date().toISOString(),
+                                                        addedBy: data.addedBy || 'admin'
+                                                    });
+                                                    addedCount++;
+                                                }
                                             });
-                                            showToast(`Successfully imported ${importedData.length} resources`);
+
+                                            if (addedCount > 0) {
+                                                await batch.commit();
+                                                showToast(`Successfully synced ${addedCount} resources to cloud!`);
+                                            } else {
+                                                showToast("No new resources to import.");
+                                            }
                                         } catch (err) {
-                                            alert("Failed to parse JSON file: " + err.message);
+                                            console.error("Import/Sync Error:", err);
+                                            alert("Failed to import: " + err.message);
                                         }
                                     };
                                     reader.readAsText(file);
@@ -908,6 +1022,14 @@ function AdminDashboard({ resources, setResources, setAuth, navigate, darkMode, 
                                 }}
                             />
                         </label>
+
+                        <button
+                            onClick={handleRefresh}
+                            className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 dark:bg-[#131B2F] dark:hover:bg-[#1E293B] text-slate-700 dark:text-slate-300 px-3 py-2 rounded-lg text-sm font-medium transition-colors border border-slate-200 dark:border-[#2D3852]"
+                            title="Force sync with Firestore"
+                        >
+                            <Clock className="w-4 h-4" /> Refresh
+                        </button>
 
                         <button
                             onClick={runBulkAIRecategorize}

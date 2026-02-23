@@ -27,3 +27,9 @@ dist-ssr/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Assistant data
+.agent/
+.gemini/
+brain/
+*.pen
