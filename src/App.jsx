@@ -487,8 +487,10 @@ function HomeView({ resources, bookmarks, setBookmarks, darkMode, toggleDarkMode
 }
 
 function ResourceCard({ resource, isBookmarked, onBookmark, onTagClick }) {
+    const [isExpanded, setIsExpanded] = useState(false);
     const isNewlyAdded = isNew(resource.addedAt);
     const displayImage = resource.thumbnail || (resource.url ? `https://s.wordpress.com/mshots/v1/${encodeURIComponent(resource.url)}?w=800` : null);
+    const hasLongDescription = resource.description && resource.description.length > 160;
 
     return (
         <div className="group flex flex-col bg-white dark:bg-[#131B2F] rounded-2xl border border-slate-200 dark:border-transparent overflow-hidden hover:shadow-xl hover:shadow-[#5B45FF]/10 hover:-translate-y-1 transition-all duration-300">
@@ -563,9 +565,18 @@ function ResourceCard({ resource, isBookmarked, onBookmark, onTagClick }) {
                     </h3>
                 </div>
 
-                <p className="text-sm text-slate-500 dark:text-slate-300 line-clamp-3 mb-5 flex-1 leading-relaxed">
+                <p className={`text-sm text-slate-500 dark:text-slate-300 ${isExpanded ? '' : 'line-clamp-3'} mb-2 flex-1 leading-relaxed`}>
                     {resource.description}
                 </p>
+
+                {hasLongDescription && (
+                    <button
+                        onClick={(e) => { e.preventDefault(); setIsExpanded(!isExpanded); }}
+                        className="text-[12px] font-bold text-indigo-600 dark:text-[#8B8BFF] hover:underline mb-4 flex items-center gap-1"
+                    >
+                        {isExpanded ? 'Show Less' : 'Read More...'}
+                    </button>
+                )}
 
                 <div className="flex flex-wrap gap-2 mb-5">
                     {resource.tags && resource.tags.slice(0, 4).map(tag => (
